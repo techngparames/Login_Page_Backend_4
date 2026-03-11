@@ -1,0 +1,121 @@
+  // backend/routes/employeeActivity.js
+  const express = require("express");
+  const router = express.Router();
+  const mongoose = require("mongoose");
+
+  // ================= Employee Activity Schema =================
+  const EmployeeActivitySchema = new mongoose.Schema({
+    employeeId: { type: String, required: true },
+    name: { type: String, required: true },
+    date: { type: Date, default: () => new Date().setHours(0, 0, 0, 0) }, // per day
+    loginTime: { type: Date, default: null },
+    pauseTimes: [{ start: Date, end: Date }], // track multiple pauses
+    logoutTime: { type: Date, default: null },
+    workedHours: { type: Number, default: 0 }, // in milliseconds
+  });
+
+  const EmployeeActivity = mongoose.model("EmployeeActivity", EmployeeActivitySchema);
+
+  // ================= GET /activities =================
+  // Fetch all employee activities (only logged-in users, exclude default dummy)
+  router.get("/activities", async (req, res) => {
+    try {
+      const allActivities = await EmployeeActivity.find({
+        employeeId: { $ne: "EMP_DEFAULT_001" }, // exclude default dummy
+        loginTime: { $ne: null },               // only users who logged in
+      }).sort({ loginTime: -1 });
+
+      const activities = allActivities.map((act) => ({
+        date: act.loginTime.toLocaleDateString(),
+        employeeId: act.employeeId,
+        name: act.name || "",
+        loginTime: act.loginTime ? act.loginTime.toLocaleTimeString() : "",
+        pauseTime: act.pauseTimes.map((p) => {
+          const start = new Date(p.start).toLocaleTimeString();
+          const end = p.end ? new Date(p.end).toLocaleTimeString() : "Ongoing";
+          return `${start} - ${end}`;
+        }).join(", "),
+        logoutTime: act.logoutTime ? act.logoutTime.toLocaleTimeString() : "",
+        workingHours: act.logoutTime
+          ? Math.floor((act.logoutTime - act.loginTime) / (1000 * 60 * 60)) + "h"
+          : "",
+      }));
+
+      res.status(200).json({ success: true, activities });
+    } catch (err) {
+      console.error("Error fetching activities:", err);
+      res.status(500).json({ success: false, message: "Failed to fetch activity" });
+    }
+  });
+
+  // ================= POST /action =================
+  // Record login, pause, resume, logout actions
+  router.post("/action", async (req, res) => {
+    try {
+      const { employeeId, name, action } = req.body;
+      if (!employeeId || !name || !action) {
+        return res.status(400).json({ success: false, message: "employeeId, name, and action required" });
+      }
+
+      // find today's record
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      let activity = await EmployeeActivity.findOne({ employeeId, date: todayStart });
+      if (!activity) {
+        activity = new EmployeeActivity({ employeeId, name, date: todayStart });
+      }
+
+      const now = new Date();
+
+      switch (action) {
+        case "login":
+          activity.loginTime = now;
+          break;
+
+        case "pause":
+          activity.pauseTimes.push({ start: now, end: null });
+          break;
+
+        case "resume":
+          const lastPause = activity.pauseTimes[activity.pauseTimes.length - 1];
+          if (lastPause && !lastPause.end) {
+            lastPause.end = now;
+          } else {
+            return res.status(400).json({ success: false, message: "No active pause to resume" });
+          }
+          break;
+
+        case "logout":
+          if (!activity.loginTime) {
+            return res.status(400).json({ success: false, message: "Cannot logout before login" });
+          }
+
+          activity.logoutTime = now;
+
+          // calculate worked hours
+          let totalPause = 0;
+          if (activity.pauseTimes && activity.pauseTimes.length > 0) {
+            activity.pauseTimes.forEach((p) => {
+              const start = new Date(p.start).getTime();
+              const end = p.end ? new Date(p.end).getTime() : now.getTime();
+              totalPause += end - start;
+            });
+          }
+
+          activity.workedHours = activity.logoutTime - activity.loginTime - totalPause;
+          break;
+
+        default:
+          return res.status(400).json({ success: false, message: "Invalid action" });
+      }
+
+      await activity.save();
+      res.status(200).json({ success: true, message: `${action} recorded`, activity });
+    } catch (err) {
+      console.error("Error recording action:", err);
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  });
+
+  module.exports = router;
